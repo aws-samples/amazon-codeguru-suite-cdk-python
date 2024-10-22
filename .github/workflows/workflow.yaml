@@ -1,0 +1,134 @@
+name: cicd
+
+on: 
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+  actions: read
+  issues: write
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+  
+      - name: Configure AWS credentials
+        id: login-aws
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install AWS CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli
+
+      - name: Install CDK
+        run: |
+          npm install -g aws-cdk@2.x
+
+      - name: CodeGuru Reviewer
+        uses: aws-actions/codeguru-reviewer@v1.1
+        continue-on-error: true
+        with:
+          s3_bucket: ${{ secrets.CodeGuruReviewArtifactBucketName }}
+          source_path: .
+          build_path: ./lambda/
+          source_commit: ${{ github.event.after || github.event.pull_request.head.sha }}
+          destination_commit: ${{ github.event.before || github.event.pull_request.base.sha }}
+          source_branch: ${{ github.head_ref || github.ref}}
+          destination_branch: ${{ github.base_ref || github.ref }}
+          merge_base_commit: ${{ github.event.pull_request.merge_commit_sha }}
+          
+      - name: CodeGuru Reviewer Findings
+        run: |
+            cat codeguru-results.sarif.json | jq '.runs[].results[] | select(.level == "note")'
+
+      - name: CodeGuru Security
+        uses: aws-actions/codeguru-security@v1
+        with:
+          source_path: .
+          aws_region: ${{ vars.AWS_REGION }}
+          scan_name: CGS-Github-${{ github.event.repository.name }}-${{ github.event.pull_request.head.ref }}-${{ github.run_id }}
+
+      - name: Print findings
+        env:
+          AWS_REGION = ${{ vars.AWS_REGION }}
+          SCAN_NAME = CGS-Github-${{ github.event.repository.name }}-${{ github.event.pull_request.head.ref }}-${{ github.run_id }}
+        run: |
+          # Fail if there is at least 1 Critical issue (count). Critical is indicated by "error" level in the results. 
+          # Otherwise, Lower severities (high, normal, low) are all "warning" levels and pipeline will proceed.
+
+          prefix_link="https://$AWS_REGION.console.aws.amazon.com/codeguru/security/scans/"
+          scan_name=$SCAN_NAME
+          suffix_link="?region=$AWS_REGION#tab-metrics"
+
+          echo "Review Dashboard Link:"
+          echo "-------------------------------"
+          echo "$prefix_link$scan_name$suffix_link"
+          echo "-------------------------------"
+
+          count=$(cat codeguru-security-results.sarif.json | jq '.runs[].results[] | select(.level == "error") | .level' | wc -l)
+          if (( $count > 0 )); then
+            echo "There are $count critical findings, hence stopping the pipeline."
+            cat codeguru-security-results.sarif.json | jq '.runs[].results[] | select(.level == "error")'
+            exit 1
+          else
+            echo "There are no critical findings."
+            cat codeguru-security-results.sarif.json | jq '.runs[].results[]'
+          fi
+
+      - name: Wait for approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: ${{ var.approversname/team }}
+          minimum-approvals: 1    
+          timeout-minutes: 30
+          issue-title: "Deploying app for Pull Request: ${{ github.event.pull_request.title }}"
+          issue-body: "Please approve or deny the deployment of application"
+          exclude-workflow-initiator-as-approver: false
+          additional-approved-words: ''
+          additional-denied-words: ''
+          
+      - name: Synth
+        run: |
+          cdk synth
+      - name: Deploy
+        run: |
+          cdk deploy --require-approval never
+
+      - name: Get SQS Queue URL
+        id: get-sqs-queue-url
+        run: |
+          SQS_QUEUE_URL=$(aws sqs get-queue-url --queue-name "cdk-python-queue" --query 'QueueUrl' --output text)
+          echo "SQS_QUEUE_URL=$SQS_QUEUE_URL" >> $GITHUB_OUTPUT
+
+      - name: Send messages to SQS
+        env:
+          SQS_QUEUE_URL: ${{ steps.get-sqs-queue-url.outputs.SQS_QUEUE_URL }}
+        run: |
+          cd scripts
+          chmod +x send_sqs_messages.sh
+          ./send_sqs_messages.sh

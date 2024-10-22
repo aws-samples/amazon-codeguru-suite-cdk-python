@@ -1,0 +1,4 @@
+aws-cdk-lib==2.117.0
+constructs>=10.0.0,<11.0.0
+codeguru_profiler_agent
+boto3

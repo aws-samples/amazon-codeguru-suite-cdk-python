@@ -1,0 +1,6 @@
+codeguru_profiler_agent
+boto3==1.26.90
+botocore==1.29.90
+urllib3<2
+aws-lambda-powertools
+cryptography
