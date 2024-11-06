@@ -2,7 +2,7 @@
 
 This repository contains a GitHub Actions workflow that implements a Continuous Integration and Continuous Deployment (CI/CD) pipeline that reviews, analyses, and provides recommendations for your code using CodeGuru Reviewer, Profiler, and Security before it deploys your application code and infrastructure on AWS using CDK. The pipeline is triggered on pull requests to the `main` branch and performs the following tasks:
 
-![Alt text](diagrams/ArchDiagram.jpg?raw=true)
+![Alt text](diagrams/ArchDiagram.png?raw=true)
 
 ## Pipeline Steps
 
